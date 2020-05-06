@@ -1,10 +1,10 @@
-using Newtonsoft.Json;
-using Newtonsoft.Json.Serialization;
 using System;
 using System.IO;
 using System.Net.Http;
-using System.Net.Http.Headers;
 using System.Text;
+using System.Text.RegularExpressions;
+using System.Threading.Tasks;
+using System.Web;
 
 namespace MusicBeePlugin
 {
@@ -12,25 +12,22 @@ namespace MusicBeePlugin
     {
         private MusicBeeApiInterface mbApiInterface;
         private Settings settings;
+        private SettingsWindow settingsWindow;
 
         private readonly PluginInfo about = new PluginInfo();
         private readonly HttpClient client = new HttpClient();
 
+        private bool isSending = false;
+
         public PluginInfo Initialise(IntPtr apiInterfacePtr)
         {
-            JsonConvert.DefaultSettings = () => new JsonSerializerSettings
-            {
-                Formatting = Formatting.Indented,
-                ContractResolver = new CamelCasePropertyNamesContractResolver()
-            };
-
             mbApiInterface = new MusicBeeApiInterface();
             mbApiInterface.Initialise(apiInterfacePtr);
 
             about.PluginInfoVersion = PluginInfoVersion;
             about.Name = "Sounday";
-            about.Description = "Yet Another Tracking Plugin";
-            about.Author = "Seldszar";
+            about.Description = "Yet another customizable scrobbling plugin for MusicBee.";
+            about.Author = "Alexandre Breteau";
             about.TargetApplication = "";
             about.Type = PluginType.General;
             about.VersionMajor = 1;
@@ -48,7 +45,10 @@ namespace MusicBeePlugin
 
         public bool Configure(IntPtr panelHandle)
         {
-            return false;
+            settingsWindow = new SettingsWindow(this, settings);
+            settingsWindow.Show();
+
+            return true;
         }
 
         public void SaveSettings()
@@ -60,61 +60,64 @@ namespace MusicBeePlugin
         {
             switch (type)
             {
-                case NotificationType.PluginStartup:
                 case NotificationType.TrackChanged:
-                    SendRequest();
+                case NotificationType.PlayStateChanged:
+                    if (mbApiInterface.Player_GetPlayState() == PlayState.Playing)
+                        SendRequest();
+
                     break;
             }
         }
 
         private void LoadSettings()
         {
-            string dataPath = mbApiInterface.Setting_GetPersistentStoragePath();
-            string settingsFilePath = Path.Combine(dataPath, $"{about.Name}.json");
-            string settingsContent = File.ReadAllText(settingsFilePath);
+            string storagePath = mbApiInterface.Setting_GetPersistentStoragePath();
+            string filePath = Path.Combine(mbApiInterface.Setting_GetPersistentStoragePath(), $"{about.Name}.settings");
 
-            settings = JsonConvert.DeserializeObject<Settings>(settingsContent);
+            settings = Settings.GetInstance(filePath);
         }
 
         private async void SendRequest()
         {
-            Track? currentTrack = GetCurrentTrack();
+            if (isSending)
+                return;
 
-            try
+            isSending = true;
+
+            while (true)
             {
-                string payload = JsonConvert.SerializeObject(new
+                try
                 {
-                    Track = currentTrack,
-                });
+                    if (string.IsNullOrEmpty(settings.RequestUri))
+                        return;
 
-                HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Post, settings.Path);
-                StringContent content = new StringContent(payload, Encoding.UTF8, "application/json");
+                    string payload = Regex.Replace(settings.Content, @"{(\w+)}", match =>
+                    {
+                        if (Enum.TryParse(match.Groups[1].Value, out MetaDataType field))
+                            return HttpUtility.JavaScriptStringEncode(mbApiInterface.NowPlaying_GetFileTag(field));
 
-                request.Content = content;
+                        return match.Value;
+                    });
 
-                if (!string.IsNullOrEmpty(settings.Token))
-                    request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", settings.Token);
+                    HttpRequestMessage request = new HttpRequestMessage(new HttpMethod(settings.RequestMethod), settings.RequestUri);
+                    StringContent content = new StringContent(payload, Encoding.UTF8, settings.MediaType);
 
-                await client.SendAsync(request);
+                    request.Content = content;
+
+                    foreach (var pair in settings.Headers)
+                        request.Headers.Add(pair.Key, pair.Value);
+
+                    await client.SendAsync(request);
+
+                    break;
+                }
+                catch (HttpRequestException)
+                {
+                    await Task.Delay(3000);
+                }
             }
-            catch { }
-        }
 
-        private Track? GetCurrentTrack()
-        {
-            string trackTitle = mbApiInterface.NowPlaying_GetFileTag(MetaDataType.TrackTitle);
-            string artist = mbApiInterface.NowPlaying_GetFileTag(MetaDataType.Artist);
-            string album = mbApiInterface.NowPlaying_GetFileTag(MetaDataType.Album);
-
-            if (string.IsNullOrEmpty(trackTitle))
-                return null;
-
-            return new Track
-            {
-                Album = album,
-                Artist = artist,
-                Title = trackTitle,
-            };
+            isSending = false;
         }
     }
 }
