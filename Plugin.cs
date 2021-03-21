@@ -84,17 +84,33 @@ namespace MusicBeePlugin
 
             isSending = true;
 
-            while (true)
+            while (isSending)
             {
                 try
                 {
                     if (string.IsNullOrEmpty(settings.RequestUri))
                         return;
 
-                    string payload = Regex.Replace(settings.Content, @"{(\w+)}", match =>
+                    string payload = Regex.Replace(settings.Content, @"{(\w+):(\w+)}", match =>
                     {
-                        if (Enum.TryParse(match.Groups[1].Value, out MetaDataType field))
-                            return HttpUtility.JavaScriptStringEncode(mbApiInterface.NowPlaying_GetFileTag(field));
+                        switch (match.Groups[1].Value)
+                        {
+                            case "property":
+                                {
+                                    if (Enum.TryParse(match.Groups[2].Value, out FilePropertyType field))
+                                        return HttpUtility.JavaScriptStringEncode(mbApiInterface.NowPlaying_GetFileProperty(field));
+
+                                    break;
+                                }
+
+                            case "tag":
+                                {
+                                    if (Enum.TryParse(match.Groups[2].Value, out MetaDataType field))
+                                        return HttpUtility.JavaScriptStringEncode(mbApiInterface.NowPlaying_GetFileTag(field));
+
+                                    break;
+                                }
+                        }
 
                         return match.Value;
                     });
@@ -107,17 +123,16 @@ namespace MusicBeePlugin
                     foreach (var pair in settings.Headers)
                         request.Headers.Add(pair.Key, pair.Value);
 
-                    await client.SendAsync(request);
+                    var response = await client.SendAsync(request);
 
-                    break;
+                    if (response.IsSuccessStatusCode)
+                        isSending = false;
                 }
-                catch (HttpRequestException)
+                catch
                 {
                     await Task.Delay(3000);
                 }
             }
-
-            isSending = false;
         }
     }
 }
